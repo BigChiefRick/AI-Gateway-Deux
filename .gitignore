@@ -1,0 +1,32 @@
+# Local secrets and deployment overrides
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+*.pfx
+
+# Local tooling
+.venv/
+__pycache__/
+.terraform/
+*.tfstate
+*.tfstate.*
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Generated packages and local operational data
+dist/
+*.log
+*.sqlite
+*.sqlite3
+*.db
+*.dump
+*.bak
+.worktrees/
+.codex-*/

@@ -1,0 +1,295 @@
+name: ai-gateway-archestra
+
+services:
+  archestra:
+    image: archestra/platform@sha256:5bdf6d1f0b0e706778674103f7c29e50ef91aaa473584f70e417f8cbf62ab984
+    container_name: archestra
+    restart: unless-stopped
+    ports:
+      - "${ARCHESTRA_BIND_ADDRESS:-0.0.0.0}:3000:3000"
+      - "${ARCHESTRA_BIND_ADDRESS:-0.0.0.0}:9000:9000"
+    environment:
+      ARCHESTRA_QUICKSTART: "true"
+      ARCHESTRA_BETA: "true"
+      ARCHESTRA_ANALYTICS: "disabled"
+      ARCHESTRA_OTEL_CAPTURE_CONTENT: "false"
+      ARCHESTRA_FRONTEND_URL: "${ARCHESTRA_FRONTEND_URL:-http://192.0.2.10:3000}"
+      ARCHESTRA_API_BASE_URL: "${ARCHESTRA_API_BASE_URL:-http://192.0.2.10:9000}"
+      ARCHESTRA_AUTH_ADDITIONAL_TRUSTED_ORIGINS: "${ARCHESTRA_AUTH_ADDITIONAL_TRUSTED_ORIGINS:-http://192.0.2.10:9000}"
+      ARCHESTRA_TRUST_PROXY: "true"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - archestra-postgres-data:/var/lib/postgresql/data
+      - archestra-app-data:/app/data
+
+  https-proxy:
+    image: caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
+    container_name: ai-gateway-https
+    restart: unless-stopped
+    ports:
+      - "${ARCHESTRA_BIND_ADDRESS:-192.0.2.10}:80:80"
+      - "${ARCHESTRA_BIND_ADDRESS:-192.0.2.10}:443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - archestra-caddy-data:/data
+      - archestra-caddy-config:/config
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      archestra:
+        condition: service_healthy
+      dlp-policy:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:2019/config/ >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  dlp-policy:
+    build:
+      context: ${DLP_POLICY_BUILD_CONTEXT:-/opt/ai-gateway/services/policy}
+    image: ai-gateway/policy:0.8.5
+    container_name: ai-gateway-dlp
+    restart: unless-stopped
+    ports:
+      - "${DLP_BIND_ADDRESS:-192.0.2.10}:4200:8000"
+    environment:
+      UPSTREAM_BASE_URL: ${DLP_UPSTREAM_BASE_URL:-http://host.docker.internal:11434}
+      UPSTREAM_API_KEY: ${DLP_UPSTREAM_API_KEY:-ollama}
+      LOCAL_UPSTREAM_BASE_URL: ${DLP_UPSTREAM_BASE_URL:-http://host.docker.internal:11434}
+      LOCAL_UPSTREAM_API_KEY: ${DLP_UPSTREAM_API_KEY:-ollama}
+      LOCAL_UPSTREAM_MODEL: ${DLP_DEFAULT_MODEL:-granite4.1:3b}
+      EXTERNAL_UPSTREAM_BASE_URL: ${OPENAI_DLP_UPSTREAM_BASE_URL:-https://api.openai.com}
+      EXTERNAL_UPSTREAM_API_KEY: ${OPENAI_API_KEY:-}
+      EXTERNAL_UPSTREAM_MODEL: ${OPENAI_DLP_DEFAULT_MODEL:-}
+      POLICY_API_KEY: ${DLP_POLICY_API_KEY:?Set DLP_POLICY_API_KEY}
+      GUARDRAIL_ADMIN_KEY: ${DLP_ADMIN_API_KEY:?Set DLP_ADMIN_API_KEY}
+      GUARDRAIL_DATABASE_URL: postgresql://dlp:${DLP_DB_PASSWORD:?Set DLP_DB_PASSWORD}@dlp-postgres:5432/dlp
+      ARCHESTRA_ADMIN_AUTHZ_URL: http://archestra:9000/api/identity-providers
+      ARCHESTRA_SESSION_ORIGIN: ${ARCHESTRA_SESSION_ORIGIN:-https://gateway.example.com}
+      IDENTITY_HMAC_KEY: ${DLP_IDENTITY_HMAC_KEY:?Set DLP_IDENTITY_HMAC_KEY}
+      ALLOW_UNSIGNED_IDENTITY_HEADERS: "false"
+      DEFAULT_USER_ID: ${DLP_DEFAULT_USER_ID:-gateway-deux}
+      DEFAULT_AGENT_ID: ${DLP_DEFAULT_AGENT_ID:-archestra-managed-chat}
+      MEM0_API_KEY: ${MEM0_API_KEY:?Set MEM0_API_KEY}
+      MEM0_APP_ID: ai-gateway
+      MEM0_SCOPE_MODE: shared
+      MEM0_SHARED_USER_ID: ${DLP_DEFAULT_USER_ID:-gateway-deux}
+      MEM0_TRUSTED_READ_USER_IDS: ${MEM0_TRUSTED_READ_USER_IDS:-}
+      MEM0_EXPLICIT_TOP_K: ${MEM0_EXPLICIT_TOP_K:-20}
+      MEM0_MIN_RELEVANCE_SCORE: ${MEM0_MIN_RELEVANCE_SCORE:-0.25}
+      GATEWAY_TIMEZONE: ${GATEWAY_TIMEZONE:-America/Chicago}
+      DEFAULT_ALLOWED_MODELS: ${DLP_ALLOWED_MODELS:-granite4.1:3b},${DLP_AUTO_MODEL_ALIAS:-gateway-auto},${DLP_EXTERNAL_MODEL_ALIAS:-gateway-cloud}
+      DEFAULT_ALLOWED_TOOLS: ""
+      LOCAL_MODEL_ALIAS: ${DLP_DEFAULT_MODEL:-granite4.1:3b}
+      AUTO_MODEL_ALIAS: ${DLP_AUTO_MODEL_ALIAS:-gateway-auto}
+      EXTERNAL_MODEL_ALIAS: ${DLP_EXTERNAL_MODEL_ALIAS:-gateway-cloud}
+      EXTERNAL_MODEL_ENABLED: ${DLP_EXTERNAL_ENABLED:-false}
+      MEMORY_READ_ENABLED: "true"
+      MEMORY_WRITE_ENABLED: "true"
+      LOCAL_MAX_COMPLETION_TOKENS: "1024"
+      EXTERNAL_MAX_COMPLETION_TOKENS: "1024"
+      LOG_LEVEL: INFO
+      MAX_REQUEST_BYTES: "1048576"
+    depends_on:
+      dlp-postgres:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz')"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # Pre-cutover validation target for the integrated local-first router. It
+  # proves the paid-provider credential/model without changing the live 4200
+  # route and is stopped after commissioning succeeds or rolls back.
+  dlp-router-canary:
+    profiles: ["router-canary"]
+    build:
+      context: ${DLP_POLICY_BUILD_CONTEXT:-/opt/ai-gateway/services/policy}
+    image: ai-gateway/policy:0.8.5
+    container_name: ai-gateway-dlp-router-canary
+    restart: "no"
+    ports:
+      - "${DLP_BIND_ADDRESS:-192.0.2.10}:4202:8000"
+    environment:
+      UPSTREAM_BASE_URL: ${DLP_UPSTREAM_BASE_URL:-http://host.docker.internal:11434}
+      UPSTREAM_API_KEY: ${DLP_UPSTREAM_API_KEY:-ollama}
+      LOCAL_UPSTREAM_BASE_URL: ${DLP_UPSTREAM_BASE_URL:-http://host.docker.internal:11434}
+      LOCAL_UPSTREAM_API_KEY: ${DLP_UPSTREAM_API_KEY:-ollama}
+      LOCAL_UPSTREAM_MODEL: ${DLP_DEFAULT_MODEL:-granite4.1:3b}
+      EXTERNAL_UPSTREAM_BASE_URL: ${OPENAI_DLP_UPSTREAM_BASE_URL:-https://api.openai.com}
+      EXTERNAL_UPSTREAM_API_KEY: ${OPENAI_API_KEY:-}
+      EXTERNAL_UPSTREAM_MODEL: ${OPENAI_DLP_DEFAULT_MODEL:-}
+      POLICY_API_KEY: ${DLP_POLICY_API_KEY:?Set DLP_POLICY_API_KEY}
+      GUARDRAIL_ADMIN_KEY: ${DLP_ADMIN_API_KEY:?Set DLP_ADMIN_API_KEY}
+      GUARDRAIL_DATABASE_URL: postgresql://dlp:${DLP_DB_PASSWORD:?Set DLP_DB_PASSWORD}@dlp-postgres:5432/dlp
+      ARCHESTRA_ADMIN_AUTHZ_URL: http://archestra:9000/api/identity-providers
+      ARCHESTRA_SESSION_ORIGIN: ${ARCHESTRA_SESSION_ORIGIN:-https://gateway.example.com}
+      IDENTITY_HMAC_KEY: ${DLP_IDENTITY_HMAC_KEY:?Set DLP_IDENTITY_HMAC_KEY}
+      ALLOW_UNSIGNED_IDENTITY_HEADERS: "false"
+      DEFAULT_USER_ID: ${DLP_DEFAULT_USER_ID:-gateway-deux}
+      DEFAULT_AGENT_ID: router-canary
+      MEM0_API_KEY: ${MEM0_API_KEY:?Set MEM0_API_KEY}
+      MEM0_APP_ID: ai-gateway
+      MEM0_SCOPE_MODE: shared
+      MEM0_SHARED_USER_ID: ${DLP_DEFAULT_USER_ID:-gateway-deux}
+      MEM0_TRUSTED_READ_USER_IDS: ${MEM0_TRUSTED_READ_USER_IDS:-}
+      MEM0_EXPLICIT_TOP_K: ${MEM0_EXPLICIT_TOP_K:-20}
+      MEM0_MIN_RELEVANCE_SCORE: ${MEM0_MIN_RELEVANCE_SCORE:-0.25}
+      DEFAULT_ALLOWED_MODELS: ${DLP_ALLOWED_MODELS:-granite4.1:3b},${DLP_AUTO_MODEL_ALIAS:-gateway-auto},${DLP_EXTERNAL_MODEL_ALIAS:-gateway-cloud}
+      DEFAULT_ALLOWED_TOOLS: ""
+      LOCAL_MODEL_ALIAS: ${DLP_DEFAULT_MODEL:-granite4.1:3b}
+      AUTO_MODEL_ALIAS: ${DLP_AUTO_MODEL_ALIAS:-gateway-auto}
+      EXTERNAL_MODEL_ALIAS: ${DLP_EXTERNAL_MODEL_ALIAS:-gateway-cloud}
+      EXTERNAL_MODEL_ENABLED: "true"
+      MEMORY_READ_ENABLED: "false"
+      MEMORY_WRITE_ENABLED: "false"
+      LOCAL_MAX_COMPLETION_TOKENS: "128"
+      # Reasoning-model budgets include hidden reasoning tokens. Keep this
+      # commissioning canary aligned with the live external-route ceiling so
+      # a healthy provider cannot be misclassified as returning empty output.
+      EXTERNAL_MAX_COMPLETION_TOKENS: "1024"
+      LOG_LEVEL: INFO
+      MAX_REQUEST_BYTES: "1048576"
+    depends_on:
+      dlp-postgres:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz')"
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+
+  # Optional paid-cloud route. It is deliberately isolated from the proven
+  # local Ollama DLP service and starts only with `--profile openai`.
+  # Blank credentials make the service unhealthy/fail-closed rather than
+  # forwarding an unguarded request.
+  dlp-openai-policy:
+    profiles: ["openai"]
+    build:
+      context: ${DLP_POLICY_BUILD_CONTEXT:-/opt/ai-gateway/services/policy}
+    image: ai-gateway/policy:0.8.5
+    container_name: ai-gateway-dlp-openai
+    restart: unless-stopped
+    ports:
+      - "${DLP_BIND_ADDRESS:-192.0.2.10}:4201:8000"
+    environment:
+      UPSTREAM_BASE_URL: ${OPENAI_DLP_UPSTREAM_BASE_URL:-https://api.openai.com}
+      UPSTREAM_API_KEY: ${OPENAI_API_KEY:-}
+      POLICY_API_KEY: ${OPENAI_DLP_POLICY_API_KEY:-}
+      GUARDRAIL_ADMIN_KEY: ${DLP_ADMIN_API_KEY:?Set DLP_ADMIN_API_KEY}
+      GUARDRAIL_DATABASE_URL: postgresql://dlp:${DLP_DB_PASSWORD:?Set DLP_DB_PASSWORD}@dlp-postgres:5432/dlp
+      ARCHESTRA_ADMIN_AUTHZ_URL: http://archestra:9000/api/identity-providers
+      ARCHESTRA_SESSION_ORIGIN: ${ARCHESTRA_SESSION_ORIGIN:-https://gateway.example.com}
+      IDENTITY_HMAC_KEY: ${DLP_IDENTITY_HMAC_KEY:?Set DLP_IDENTITY_HMAC_KEY}
+      ALLOW_UNSIGNED_IDENTITY_HEADERS: "false"
+      DEFAULT_USER_ID: ${OPENAI_DLP_DEFAULT_USER_ID:-gateway-deux}
+      DEFAULT_AGENT_ID: ${OPENAI_DLP_DEFAULT_AGENT_ID:-archestra-openai-chat}
+      MEM0_API_KEY: ${MEM0_API_KEY:?Set MEM0_API_KEY}
+      MEM0_APP_ID: ai-gateway
+      MEM0_SCOPE_MODE: shared
+      MEM0_SHARED_USER_ID: ${OPENAI_DLP_DEFAULT_USER_ID:-gateway-deux}
+      MEM0_TRUSTED_READ_USER_IDS: ${MEM0_TRUSTED_READ_USER_IDS:-}
+      MEM0_EXPLICIT_TOP_K: ${MEM0_EXPLICIT_TOP_K:-20}
+      MEM0_MIN_RELEVANCE_SCORE: ${MEM0_MIN_RELEVANCE_SCORE:-0.25}
+      DEFAULT_ALLOWED_MODELS: ${OPENAI_DLP_ALLOWED_MODELS:-}
+      DEFAULT_ALLOWED_TOOLS: ""
+      LOCAL_MODEL_ALIAS: ${OPENAI_DLP_DEFAULT_MODEL:-openai-model-unconfigured}
+      AUTO_MODEL_ALIAS: ${OPENAI_DLP_DEFAULT_MODEL:-openai-model-unconfigured}
+      EXTERNAL_MODEL_ALIAS: external-disabled
+      EXTERNAL_MODEL_ENABLED: "false"
+      MEMORY_READ_ENABLED: "true"
+      MEMORY_WRITE_ENABLED: "true"
+      LOCAL_MAX_COMPLETION_TOKENS: "1024"
+      EXTERNAL_MAX_COMPLETION_TOKENS: "1024"
+      LOG_LEVEL: INFO
+      MAX_REQUEST_BYTES: "1048576"
+    depends_on:
+      dlp-postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz')"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  dlp-postgres:
+    image: postgres:17-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
+    container_name: ai-gateway-dlp-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: dlp
+      POSTGRES_USER: dlp
+      POSTGRES_PASSWORD: ${DLP_DB_PASSWORD:?Set DLP_DB_PASSWORD}
+    volumes:
+      - archestra-dlp-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -q -d dlp -U dlp"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+
+  web-research-mcp:
+    build:
+      context: ${WEB_RESEARCH_BUILD_CONTEXT:-/opt/ai-gateway/services/web-research}
+    image: ai-gateway/web-research:0.1.0
+    container_name: gateway-web-research
+    restart: unless-stopped
+    environment:
+      WEB_RESEARCH_TIMEOUT_SECONDS: "20"
+      WEB_RESEARCH_MAX_WEB_BYTES: "2097152"
+      WEB_RESEARCH_MAX_DOCUMENT_BYTES: "10485760"
+      WEB_RESEARCH_MAX_OCR_PAGES: "5"
+      WEB_RESEARCH_MAX_TEXT_CHARS: "20000"
+      GATEWAY_TIMEZONE: ${GATEWAY_TIMEZONE:-America/Chicago}
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 1g
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import socket; s=socket.create_connection(('127.0.0.1',8000),3); s.close()"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+volumes:
+  archestra-postgres-data:
+    name: archestra-postgres-data
+  archestra-app-data:
+    name: archestra-app-data
+  archestra-dlp-postgres-data:
+    name: archestra-dlp-postgres-data
+  archestra-caddy-data:
+    name: archestra-caddy-data
+  archestra-caddy-config:
+    name: archestra-caddy-config

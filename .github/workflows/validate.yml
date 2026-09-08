@@ -1,0 +1,200 @@
+name: Validate AI Gateway
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  guardrails:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
+        env:
+          POSTGRES_DB: gateway_test
+          POSTGRES_USER: gateway
+          POSTGRES_PASSWORD: gateway-ci-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -q -d gateway_test -U gateway"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      PYTHONPATH: ${{ github.workspace }}/services/policy
+      GUARDRAIL_TEST_DATABASE_URL: postgresql://gateway:gateway-ci-only@127.0.0.1:5432/gateway_test
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            services/policy/requirements.lock
+            services/web-research/requirements.lock
+
+      - name: Install locked policy dependencies
+        run: |
+          python -m pip install --requirement services/policy/requirements.lock
+          python -m pip install --requirement services/web-research/requirements.lock
+
+      - name: Compile deployment programs
+        run: python -m compileall -q deploy/archestra services/policy/app services/web-research/app
+
+      - name: Validate canonical HTTPS proxy configuration
+        run: |
+          docker run --rm \
+            --volume "$PWD/deploy/archestra/Caddyfile:/etc/caddy/Caddyfile:ro" \
+            caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d \
+            caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+
+      - name: Run governed web-research unit tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}/services/web-research
+        run: python -m unittest discover -s services/web-research/tests -v
+
+      - name: Parse Windows operator helper
+        shell: pwsh
+        run: |
+          foreach ($path in @(
+            'clients/windows/copy-guardrail-admin-token.ps1',
+            'clients/windows/ai-gateway-secrets.ps1',
+            'clients/windows/test-ai-gateway-secrets.ps1',
+            'clients/windows/initialize-bitwarden-machine-token.ps1',
+            'clients/windows/recover-gateway-admin.ps1',
+            'clients/windows/rotate-bootstrap-admin.ps1',
+            'clients/windows/manage-end-user.ps1',
+            'clients/windows/trust-ai-gateway-ca.ps1',
+            'clients/windows/commission-gateway-entra.ps1'
+          )) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $path),
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Error $_ }
+              exit 1
+            }
+          }
+
+      - name: Run Bitwarden helper fail-closed test
+        shell: pwsh
+        run: ./clients/windows/test-ai-gateway-secrets.ps1
+
+      - name: Parse Windows OpenAI operator helpers
+        shell: pwsh
+        run: |
+          foreach ($path in @(
+            'clients/windows/stage-company-openai.ps1',
+            'clients/windows/commission-company-openai.ps1'
+          )) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $path),
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Error $_ }
+              exit 1
+            }
+          }
+
+      - name: Run policy unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          for test_file in test_safety.py test_guardrails.py test_client_compat.py; do
+            python -m unittest discover -s services/policy/tests -p "${test_file}" -v
+          done
+
+      # app.main creates its fail-closed runtime at import time. Run each
+      # database suite in a fresh interpreter so the integration-test database
+      # environment is applied before the runtime is constructed.
+      - name: Run PostgreSQL API integration tests
+        run: python -m unittest discover -s services/policy/tests -p "test_policy_api_integration.py" -v
+
+      - name: Run PostgreSQL guardrail store integration tests
+        run: python -m unittest discover -s services/policy/tests -p "test_guardrail_store_integration.py" -v
+
+      - name: Run signed OpenAI DLP profile transaction test
+        run: python deploy/archestra/test-configure-openai-dlp-profile.py
+
+      - name: Run signed OpenAI provider transaction test
+        run: python deploy/archestra/test-configure-openai-team-provider.py
+
+      - name: Run cloud budget transaction test
+        run: python deploy/archestra/test-configure-cloud-budgets.py
+
+      - name: Run guarded OpenAI agent activation transaction test
+        run: python deploy/archestra/test-activate-openai-agent.py
+
+      - name: Run personal ChatGPT subscription canary transaction test
+        run: python deploy/archestra/test-configure-chatgpt-subscription-canary.py
+
+      - name: Run end-user access management transaction test
+        run: python deploy/archestra/test-manage-end-user.py
+      - name: Run member default-agent synchronization test
+        run: python deploy/archestra/test-sync-member-default-agent.py
+
+      - name: Run bootstrap administrator rotation transaction test
+        run: python deploy/archestra/test-rotate-bootstrap-admin.py
+
+      - name: Run administrator recovery transaction test
+        run: python deploy/archestra/test-recover-admin-password.py
+
+      - name: Run HTTPS origin transaction test
+        run: python deploy/archestra/test-configure-https-origin.py
+
+      - name: Run example.com Entra OIDC transaction test
+        run: python deploy/archestra/test-configure-gateway-entra.py
+
+      - name: Run company OpenAI staging transaction test
+        run: python deploy/archestra/test-stage-company-openai.py
+
+      - name: Run Mem0 staging transaction test
+        run: python deploy/archestra/test-stage-mem0.py
+
+      - name: Run company OpenAI commissioning transaction test
+        run: python deploy/archestra/test-commission-company-openai.py
+
+      - name: Run managed routing activation transaction test
+        run: python deploy/archestra/test-activate-managed-routing.py
+
+      - name: Run managed routing canary model selection test
+        run: python deploy/archestra/test-configure-managed-routing.py
+
+      - name: Run deployment install and rollback transaction test
+        run: ./deploy/archestra/test-install-deployment.sh
+
+      - name: Build secret-free deployment bundle
+        run: ./deploy/archestra/build-deployment-bundle.sh dist
+
+      - name: Publish validated deployment bundle
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: ai-gateway-deployment-${{ github.sha }}
+          path: |
+            dist/ai-gateway-deployment-${{ github.sha }}.tar.gz
+            dist/ai-gateway-deployment-${{ github.sha }}.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 30

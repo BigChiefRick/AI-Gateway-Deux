@@ -1,0 +1,32 @@
+{
+	admin localhost:2019
+	# IP clients do not reliably send SNI. Keep the recovery certificate as the
+	# default while DNS clients receive the gateway.example.com certificate via SNI.
+	default_sni 192.0.2.10
+}
+
+https://gateway.example.com, https://192.0.2.10 {
+	tls internal
+	encode zstd gzip
+
+	handle /guardrails {
+		redir /guardrails/admin 308
+	}
+
+	handle_path /guardrails/* {
+		reverse_proxy dlp-policy:8000
+	}
+
+	handle_path /gateway/* {
+		reverse_proxy dlp-policy:8000
+	}
+
+	@api path /api/* /v1/* /v2/* /health /ready /openapi.json /.well-known/*
+	handle @api {
+		reverse_proxy archestra:9000
+	}
+
+	handle {
+		reverse_proxy archestra:3000
+	}
+}
