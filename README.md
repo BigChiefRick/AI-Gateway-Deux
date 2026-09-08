@@ -1,14 +1,40 @@
 # AI Gateway Deux
 
-A generic reference implementation for authenticated AI request processing, local and external model routing, prompt/response guardrails, governed tools, and durable memory. The application uses the neutral name **AI Gateway** and has no custom branding assets.
+A generic reference for AI request processing, routing, and guardrail setup, with no custom branding or organization-specific deployment data.
 
-- [Request lifecycle and architecture](docs/architecture.md)
-- [Model routing and commissioning](docs/routing.md)
-- [Guardrail setup and acceptance](docs/guardrail-administration.md)
+## Start with the process
+
+1. Authenticate the user and resolve provider entitlement.
+2. Apply deterministic input DLP.
+3. Obtain advisory local risk, intent, and candidate-tool classification.
+4. Apply deterministic MCP allow, deny, or approval policy.
+5. Execute approved tools and inspect results.
+6. Retrieve authorized organizational memory with provenance.
+7. Route to the user's permitted provider and model.
+8. Apply deterministic output DLP.
+9. Decide whether sanitized knowledge may be written to memory.
+10. Correlate policy, provider, tool, memory, and cost events.
+
+The classifier advises; deterministic policy grants or denies access.
+
+## Design and setup guides
+
+- [Architecture and provider-routing decision](docs/architecture-decision.md)
+- [Ordered managed-path and guardrail contract](docs/closed-managed-lane.md)
+- [Phased deployment and acceptance](docs/proxmox-deployment-plan.md)
+- [Environment worksheet](docs/environment-worksheet.md)
+- [Target design versus included implementation](docs/implementation-status.md)
+
+## Reusable code guides
+
+- [Reference request lifecycle](docs/architecture.md)
+- [Local/external routing and commissioning](docs/routing.md)
+- [Guardrail configuration and verification](docs/guardrail-administration.md)
 - [Detailed guardrail operations](deploy/archestra/guardrails.md)
-- [Deployment setup](deploy/archestra/README.md)
+- [Reference deployment setup](deploy/archestra/README.md)
 - [Validation and recovery](docs/operational-readiness.md)
-- [Client configuration](docs/end-user-guide.md)
+
+**The target design is not fully implemented by the example stack.** The code uses Mem0 Cloud and local routing classification; self-hosted memory, the separate vLLM risk classifier, governed per-user multi-provider entitlements, and external bypass controls require additional implementation and acceptance. See the implementation-status table before deployment.
 
 ## Implementation
 

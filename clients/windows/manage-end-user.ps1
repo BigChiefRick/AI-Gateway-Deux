@@ -83,7 +83,7 @@ try {
         $user = Invoke-Graph -Method GET -Path "users/$escapedEmail`?`$select=id,displayName,userPrincipalName,accountEnabled"
     }
     catch {
-        throw "Entra user '$Email' was not found in the example.com tenant."
+        throw "Entra user '$Email' was not found in tenant $TenantId."
     }
     if ($user.accountEnabled -ne $true) {
         throw "Entra user '$Email' is disabled."

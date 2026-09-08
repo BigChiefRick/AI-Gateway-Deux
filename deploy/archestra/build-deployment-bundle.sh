@@ -20,12 +20,7 @@ git archive --format=tar --prefix=ai-gateway/ "${source_ref}" \
   deploy/archestra \
   services/policy \
   services/web-research \
-  docs/architecture.md \
-  docs/end-user-guide.md \
-  docs/guardrail-administration.md \
-  docs/operational-readiness.md \
-  docs/routing.md \
-  docs/software-inventory.md \
+  docs \
   | tar -xf - -C "${release_root}/content"
 
 printf 'source_commit=%s\nworkflow_run=%s\n' \
